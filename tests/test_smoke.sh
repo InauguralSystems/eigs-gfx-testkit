@@ -1,54 +1,56 @@
 #!/usr/bin/env bash
-# Smoke tests for the package, run from CI and from a clean clone.
-# Pattern: build a tiny consumer in a tmpdir whose eigs_modules/<name>/
-# points at this repo, then `import <name>` and exercise the surface.
+# Consumer-shaped smoke test. A throwaway consumer project (its own
+# eigs.json, so the resolver has a project root) gets this package staged
+# at eigs_modules/<name>/, exactly where `--pkg add` puts it. A test file in
+# a SUBDIRECTORY then does `load_file of "<name>.eigs"`, which must resolve
+# through the eigs_modules walk, and loads the real lib/ui.eigs over the
+# stubs. Two runs: metrics on (the stubbed bitmap math) and metrics off
+# (the toolkit's own fallback), which must lay out identically.
 set -euo pipefail
 
 EIGS="${EIGENSCRIPT:-eigenscript}"
-PKG_NAME="$(python3 -c 'import json,sys;print(json.load(open("eigs.json"))["name"])')"
+PKG_NAME="$(python3 -c 'import json;print(json.load(open("eigs.json"))["name"])')"
 PKG_ROOT="$(pwd)"
 
 TMP="$(mktemp -d)"
 trap "rm -rf '$TMP'" EXIT
 
-# Pretend a consumer has cloned this package into eigs_modules/<name>/.
-mkdir -p "$TMP/eigs_modules/$PKG_NAME"
-# Copy the package tree (just the .eigs files at root — packages don't
-# vendor their own deps). cp -a preserves perms.
-cp -a "$PKG_ROOT/$PKG_NAME.eigs" "$TMP/eigs_modules/$PKG_NAME/"
-[ -f "$PKG_ROOT/eigs.json" ] && cp -a "$PKG_ROOT/eigs.json" "$TMP/eigs_modules/$PKG_NAME/"
+echo '{"name": "consumer", "version": "0.0.0", "deps": {}}' > "$TMP/eigs.json"
+mkdir -p "$TMP/eigs_modules/$PKG_NAME" "$TMP/test"
+cp -a "$PKG_ROOT/$PKG_NAME.eigs" "$PKG_ROOT/eigs.json" "$TMP/eigs_modules/$PKG_NAME/"
 
-cat > "$TMP/app.eigs" <<EOF
-import $PKG_NAME
-print of $PKG_NAME.greet of "world"
-print of $PKG_NAME.VERSION
+run_case() {
+    local metrics="$1"
+    cat > "$TMP/test/app_test.eigs" <<EOF
+load_file of "$PKG_NAME.eigs"
+gfx_testkit_metrics of $metrics
+load_file of "lib/ui.eigs"
+clicks is {"n": 0}
+define on_click(w) as:
+    clicks.n is clicks.n + 1
+    return null
+b is button of ["b1", 10, 20, 80, 30, "Click", on_click]
+gfx_testkit_record of true
+render of [b, 0, 0]
+print of ((gfx_testkit_count of "rrect") > 0)
+print of ((gfx_testkit_count of "text") > 0)
+print of (gfx_testkit_clip of [])
+print of (text_width of ["Click", 1])
+dispatch of [b, {"type": "mousedown", "button": 1, "x": 20, "y": 30}]
+dispatch of [b, {"type": "mouseup", "button": 1, "x": 20, "y": 30}]
+dispatch of [b, {"type": "mousedown", "button": 1, "x": 20, "y": 30}]
+dispatch of [b, {"type": "mouseup", "button": 1, "x": 20, "y": 30}]
+print of clicks.n
 EOF
+    (cd "$TMP/test" && "$EIGS" app_test.eigs 2>&1)
+}
 
-cd "$TMP"
-OUT=$("$EIGS" app.eigs 2>&1)
-if ! echo "$OUT" | grep -q "hello, world, from $PKG_NAME v"; then
-    echo "FAIL: greet didn't render — got:"
-    echo "$OUT"
-    exit 1
-fi
-echo "PASS: import $PKG_NAME → greet round-trips"
-
-# Private names (leading _) should not appear in the module's keys.
-# NB: use `list_contains` (list membership), NOT `contains` — `contains` is
-# string-only and returns 0 for any list operand, so `contains of [ks, ...]`
-# would pass VACUOUSLY even if the private name leaked.
-cat > "$TMP/app2.eigs" <<EOF
-import $PKG_NAME
-ks is keys of $PKG_NAME
-if (list_contains of [ks, "_internal_marker"]) == 1:
-    print of "LEAKED"
-else:
-    print of "private"
-EOF
-OUT2=$("$EIGS" "$TMP/app2.eigs" 2>&1)
-if [ "$OUT2" != "private" ]; then
-    echo "FAIL: _internal_marker should be private but appears in module keys"
-    echo "$OUT2"
-    exit 1
-fi
-echo "PASS: leading-underscore names stay private"
+# rrect drawn, text drawn, clip stack balanced, 5 glyphs x 6 px, two clicks
+want=$'true\ntrue\nnull\n30\n2'
+for m in true false; do
+    got="$(run_case "$m")" || { echo "FAIL (metrics $m): consumer run died:"; echo "$got"; exit 1; }
+    if [ "$got" != "$want" ]; then
+        echo "FAIL (metrics $m): got"; echo "$got"; echo "want"; echo "$want"; exit 1
+    fi
+    echo "PASS: load_file $PKG_NAME.eigs from eigs_modules drives lib/ui.eigs (metrics $m)"
+done

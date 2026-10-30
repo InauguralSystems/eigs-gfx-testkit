@@ -23,5 +23,12 @@ jobs:
       - name: Check TMP plants mention eigs.json
         run: bash tools/check_tmp_eigs_json.sh
 
-      - name: Run smoke tests
+      - name: Unit tests
+        run: |
+          "$EIGENSCRIPT" tests/test_gfx_testkit.eigs
+
+      - name: Consumer-shaped smoke test
         run: bash tests/test_smoke.sh
+
+      - name: Planted faults (each stub drops its call; tests must go red)
+        run: bash tests/plant_drop.sh

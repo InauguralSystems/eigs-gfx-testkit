@@ -1,0 +1,116 @@
+# Unit tests for gfx_testkit: every stub is called directly, then its count,
+# its log entry and its effect are checked. tests/plant_drop.sh deletes the
+# recording line from one stub at a time and requires this file to go red,
+# so a stub that silently drops a call cannot pass.
+
+load_file of "../gfx_testkit.eigs"
+
+failures is {"n": 0}
+
+define check(label, got, want) as:
+    if got == want:
+        print of ("ok   " + label)
+    else:
+        print of f"FAIL {label}: got {got}, want {want}"
+        failures.n is failures.n + 1
+    return null
+
+# ---- every output primitive: counted, logged with its exact args ----
+gfx_testkit_record of true
+prims is [["open", gfx_open, [640, 480, "t"]], ["close", gfx_close, null], ["clear", gfx_clear, [1, 2, 3]], ["rect", gfx_rect, [1, 2, 3, 4, 5, 6, 7]], ["rrect", gfx_rrect, [1, 2, 3, 4, 5, 6, 7, 8]], ["line", gfx_line, [1, 2, 3, 4, 5, 6, 7]], ["point", gfx_point, [9, 8, 1, 2, 3]], ["circle", gfx_circle, [5, 5, 3, 1, 2, 3]], ["text", gfx_text, [4, 4, "hi", 1, 2, 3, 2]], ["clip", gfx_clip, [0, 0, 10, 10]], ["present", gfx_present, null]]
+check of ["every output kind has a case", len of prims, len of GFXTK_OUTPUT_KINDS]
+for p in prims:
+    gfx_testkit_reset of []
+    local kind is p[0]
+    local stub is p[1]
+    local args is p[2]
+    stub of args
+    check of [kind + " counted once", gfx_testkit_count of kind, 1]
+    check of [kind + " logged once", len of (gfx_testkit_log of []), 1]
+    check of [kind + " logged with its args", gfx_testkit_calls of kind, [args]]
+
+# ---- recording off: still counted, nothing logged ----
+gfx_testkit_reset of []
+gfx_testkit_record of false
+gfx_rect of [1, 2, 3, 4, 0, 0, 0]
+gfx_rect of [1, 2, 3, 4, 0, 0, 0]
+check of ["recording off still counts", gfx_testkit_count of "rect", 2]
+check of ["recording off logs nothing", len of (gfx_testkit_log of []), 0]
+check of ["an uncalled kind counts 0", gfx_testkit_count of "line", 0]
+gfx_testkit_record of true
+
+# ---- expect is loud ----
+check of ["expect passes on the exact count", gfx_testkit_expect of ["rect", 2], true]
+threw is "no"
+try:
+    gfx_testkit_expect of ["rect", 3]
+catch e:
+    threw is e
+check of ["expect throws on a wrong count", threw, "gfx_testkit: expected 3 rect call(s), got 2"]
+
+# ---- headless clip ----
+gfx_testkit_reset of []
+check of ["no clip after reset", gfx_testkit_clip of [], null]
+gfx_clip of [1, 2, 30, 40]
+check of ["clip is kept", gfx_testkit_clip of [], [1, 2, 30, 40]]
+gfx_clip of null
+check of ["clip of null clears it", gfx_testkit_clip of [], null]
+
+# ---- clock ----
+gfx_testkit_reset of []
+check of ["default clock: first tick 1000", gfx_ticks of null, 1000]
+check of ["default clock advances by 1000", gfx_ticks of null, 2000]
+gfx_testkit_ticks of [0, 500]
+check of ["DeslanStudio clock: +500", gfx_ticks of null, 500]
+check of ["and again", gfx_ticks of null, 1000]
+gfx_testkit_ticks of [1000, 0]
+check of ["constant clock (EigenScript test_ui)", gfx_ticks of null, 1000]
+check of ["stays constant", gfx_ticks of null, 1000]
+gfx_testkit_reset of []
+check of ["reset restarts the configured clock", gfx_ticks of null, 1000]
+check of ["ticks are counted", gfx_testkit_count of "ticks", 1]
+gfx_testkit_ticks of [0, 1000]
+
+# ---- frame-keyed event tape (EigenOS twins) ----
+gfx_testkit_reset of []
+check of ["untaped poll is null", gfx_poll of null, null]
+gfx_testkit_feed of [0, {"type": "keydown", "key": "a"}]
+gfx_testkit_feed of [2, {"type": "mousedown", "x": 5, "y": 6}]
+e0 is gfx_poll of null
+check of ["frame-0 event is due at once", e0.key, "a"]
+check of ["a frame-2 event waits", gfx_poll of null, null]
+gfx_delay of 8
+check of ["still waiting at frame 1", gfx_poll of null, null]
+gfx_delay of 8
+e2 is gfx_poll of null
+check of ["due at frame 2", e2.x, 5]
+check of ["the tape is drained", gfx_poll of null, null]
+check of ["delays are counted", gfx_testkit_count of "delay", 2]
+check of ["polls are counted", gfx_testkit_count of "poll", 6]
+
+# ---- win_key queue ----
+gfx_testkit_reset of []
+check of ["empty key queue is -1", win_key of null, 0 - 1]
+gfx_testkit_key of 97
+gfx_testkit_key of 13
+check of ["keys come out in order", win_key of null, 97]
+check of ["second key", win_key of null, 13]
+check of ["then -1 again", win_key of null, 0 - 1]
+check of ["win_key calls are counted", gfx_testkit_count of "win_key", 4]
+
+# ---- text metrics ----
+gfx_testkit_reset of []
+check of ["bitmap width", gfx_text_width of ["abcd", 2], 48]
+check of ["bitmap height", gfx_text_height of 3, 21]
+gfx_testkit_metrics of false
+check of ["metrics off: width is null", gfx_text_width of ["abcd", 2], null]
+check of ["metrics off: height is null", gfx_text_height of 3, null]
+gfx_testkit_metrics of true
+check of ["width probes are counted, on or off", gfx_testkit_count of "text_width", 2]
+check of ["height probes are counted, on or off", gfx_testkit_count of "text_height", 2]
+
+if failures.n == 0:
+    print of "gfx_testkit: all passed"
+else:
+    print of f"gfx_testkit: {failures.n} FAILED"
+    throw of "gfx_testkit unit tests failed"
