@@ -1,0 +1,240 @@
+# lint: allow-file W013 -- shadowing the gfx_* builtins is what this package is for
+# gfx_testkit — headless gfx_* stubs for testing EigenScript UI code.
+#
+# Load it, then load the code under test:
+#
+#     load_file of "gfx_testkit.eigs"
+#     load_file of "lib/ui.eigs"
+#
+# Unlike most packages this one is LOADED, not imported. Its whole job is
+# to define global gfx_* functions that shadow the builtins (and stand in
+# for them on a build without the gfx extension), so code loaded after it
+# draws into a recorder instead of a window. `import` would put the stubs
+# in a namespace where lib/ui.eigs never sees them. The request
+# "gfx_testkit.eigs" resolves through the runtime's eigs_modules walk to
+# eigs_modules/gfx_testkit/gfx_testkit.eigs (see README "Consume").
+#
+# Every stub takes ONE parameter, so any call shape the callers use binds:
+# `gfx_rect of [x, y, w, h, r, g, b]` re-collects the whole list into that
+# one slot, `gfx_clip of null` binds null, `gfx_delay of 8` binds 8.
+#
+# State lives in the GFXTK dict because a function cannot rebind a global
+# from another file's scope reliably; field writes always cross (#373).
+#
+# Union of the six consumers' stub behaviour (EigenScript#2170 census):
+#   EigenScript tests/test_ui.eigs  gated draw recorder (off by default),
+#                                   clip recorded, bitmap text metrics
+#   DeslanStudio tests/test_*.eigs  gfx_ticks advances (+500) so dispatch
+#                                   never merges two clicks into a double
+#   liferaft, eddy, EigenRegex      gfx_ticks advances (+1000), bitmap
+#                                   text metrics
+#   EigenOS tools/*_twin_hosted     frame-keyed gfx_poll tape driven by
+#                                   gfx_delay; win_key queue (-1 if empty)
+# The defaults are the liferaft/eddy/EigenRegex block; the others are one
+# configuration call each (README "Per-consumer settings").
+
+GFXTK_VERSION is "0.1.0"
+
+# Kinds that draw or change what is on screen. These are logged (when
+# recording is on) and counted. Queries (poll, ticks, delay, metrics,
+# win_key) are counted only.
+GFXTK_OUTPUT_KINDS is ["open", "close", "clear", "rect", "rrect", "line", "point", "circle", "text", "clip", "present"]
+
+GFXTK is {"rec": 0, "log": [], "counts": {}, "clip": null, "tick_start": 0, "tick_step": 1000, "ticks": 0, "frame": 0, "tape": [], "tape_i": 0, "keys": [], "metrics": 1}
+
+define _gfxtk_bump(kind) as:
+    local c is GFXTK.counts[kind]
+    if c == null:
+        c is 0
+    GFXTK.counts[kind] is c + 1
+    return null
+
+define _gfxtk_out(kind, args) as:
+    _gfxtk_bump of kind
+    if GFXTK.rec == 1:
+        append of [GFXTK.log, [kind, args]]
+    return null
+
+# ---- the stubs ----
+
+define gfx_open(args) as:
+    _gfxtk_out of ["open", args]
+    return 1
+
+define gfx_close(args) as:
+    _gfxtk_out of ["close", args]
+    return null
+
+define gfx_clear(args) as:
+    _gfxtk_out of ["clear", args]
+    return null
+
+define gfx_rect(args) as:
+    _gfxtk_out of ["rect", args]
+    return null
+
+define gfx_rrect(args) as:
+    _gfxtk_out of ["rrect", args]
+    return null
+
+define gfx_line(args) as:
+    _gfxtk_out of ["line", args]
+    return null
+
+define gfx_point(args) as:
+    _gfxtk_out of ["point", args]
+    return null
+
+define gfx_circle(args) as:
+    _gfxtk_out of ["circle", args]
+    return null
+
+define gfx_text(args) as:
+    _gfxtk_out of ["text", args]
+    return null
+
+# Headless clip: the current clip rect is kept so a test can read it back
+# (gfx_testkit_clip). `gfx_clip of null` clears it, as the backend does.
+define gfx_clip(args) as:
+    _gfxtk_out of ["clip", args]
+    GFXTK.clip is args
+    return null
+
+define gfx_present(args) as:
+    _gfxtk_out of ["present", args]
+    return null
+
+# The next taped event whose frame has been reached, in feed order, or
+# null. Untaped, it is always null (the no-input headless default).
+define gfx_poll(_args) as:
+    _gfxtk_bump of "poll"
+    local i is GFXTK.tape_i
+    if i < (len of GFXTK.tape):
+        local pair is GFXTK.tape[i]
+        if pair[0] <= GFXTK.frame:
+            GFXTK.tape_i is i + 1
+            return pair[1]
+    return null
+
+# A delay is one frame: app_loop calls it once per frame, and the EigenOS
+# WM twins step their event tape on it. No time passes.
+define gfx_delay(_args) as:
+    _gfxtk_bump of "delay"
+    GFXTK.frame is GFXTK.frame + 1
+    return null
+
+# Advances by tick_step per call (0 = a constant clock).
+define gfx_ticks(_args) as:
+    _gfxtk_bump of "ticks"
+    GFXTK.ticks is GFXTK.ticks + GFXTK.tick_step
+    return GFXTK.ticks
+
+# The 5x7 bitmap-font math (#593), so layout is the same on every machine.
+# With metrics off they return null, which lib/ui_draw.eigs's load-time
+# probe reads as "no metrics" and takes its own fallback path.
+define gfx_text_width(text, scale) as:
+    _gfxtk_bump of "text_width"
+    if GFXTK.metrics != 1:
+        return null
+    return (len of text) * 6 * scale
+
+define gfx_text_height(scale) as:
+    _gfxtk_bump of "text_height"
+    if GFXTK.metrics != 1:
+        return null
+    return 7 * scale
+
+# EigenOS task-side key input: the next queued key code, or -1.
+define win_key(_args) as:
+    _gfxtk_bump of "win_key"
+    if (len of GFXTK.keys) == 0:
+        return 0 - 1
+    local k is GFXTK.keys[0]
+    list_remove_at of [GFXTK.keys, 0]
+    return k
+
+# ---- configuration ----
+
+# Recording on (1/true) or off (0/false). Off by default, so a suite that
+# never asks for the log pays nothing for it.
+define gfx_testkit_record(on) as:
+    if on:
+        GFXTK.rec is 1
+    else:
+        GFXTK.rec is 0
+    return null
+
+# The clock starts at `start`; each gfx_ticks call adds `step` and returns
+# the new value, so the first call returns start + step. The default
+# [0, 1000] is liferaft/eddy/EigenRegex; DeslanStudio is [0, 500];
+# EigenScript's test_ui wants a constant 1000: gfx_testkit_ticks of [1000, 0].
+define gfx_testkit_ticks(start, step) as:
+    GFXTK.tick_start is start
+    GFXTK.tick_step is step
+    GFXTK.ticks is start
+    return null
+
+# Text metrics on (default) or off. Call it BEFORE loading lib/ui.eigs: the
+# toolkit probes for metrics once, at load.
+define gfx_testkit_metrics(on) as:
+    if on:
+        GFXTK.metrics is 1
+    else:
+        GFXTK.metrics is 0
+    return null
+
+# Queue an event for gfx_poll to return once `frame` gfx_delay calls have
+# happened. Feed in frame order (the EigenOS twin tape contract).
+define gfx_testkit_feed(frame, event) as:
+    append of [GFXTK.tape, [frame, event]]
+    return null
+
+# Queue a key code for win_key.
+define gfx_testkit_key(code) as:
+    append of [GFXTK.keys, code]
+    return null
+
+# Forget every call, the clip, the tape, the keys and the frame count, and
+# restart the clock. Configuration (record, ticks, metrics) is kept.
+define gfx_testkit_reset() as:
+    GFXTK.log is []
+    GFXTK.counts is {}
+    GFXTK.clip is null
+    GFXTK.frame is 0
+    GFXTK.tape is []
+    GFXTK.tape_i is 0
+    GFXTK.keys is []
+    GFXTK.ticks is GFXTK.tick_start
+    return null
+
+# ---- queries and assertions ----
+
+# How many times a stub was called since the last reset ("rect", "poll", ...).
+define gfx_testkit_count(kind) as:
+    local c is GFXTK.counts[kind]
+    if c == null:
+        return 0
+    return c
+
+# The recorded [kind, args] pairs (recording must be on).
+define gfx_testkit_log() as:
+    return GFXTK.log
+
+# The args of every recorded call of one kind, in order.
+define gfx_testkit_calls(kind) as:
+    local out is []
+    for e in GFXTK.log:
+        if e[0] == kind:
+            append of [out, e[1]]
+    return out
+
+# The clip rect last set, or null.
+define gfx_testkit_clip() as:
+    return GFXTK.clip
+
+# Loud check: throws unless `kind` was called exactly `want` times.
+define gfx_testkit_expect(kind, want) as:
+    local got is gfx_testkit_count of kind
+    if got != want:
+        throw of f"gfx_testkit: expected {want} {kind} call(s), got {got}"
+    return true

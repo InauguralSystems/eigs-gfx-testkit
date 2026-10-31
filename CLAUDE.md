@@ -1,4 +1,4 @@
-# CLAUDE.md — eigs-package-template
+# CLAUDE.md — eigs-gfx-testkit (package `gfx_testkit`)
 
 See README.md for what this repo is and how to run it. This file exists
 for the standing note below, which applies to every repo in the ecosystem.
